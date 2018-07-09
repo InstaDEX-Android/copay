@@ -14,7 +14,7 @@ angular.module('copayApp.services').factory('configService', function(storageSer
 
     // Bitcore wallet service URL
     bws: {
-      url: 'https://bws.instadex.io/bws/api',
+      url: 'http://140.82.34.214:3232/bws/api',
     },
 
     download: {

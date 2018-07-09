@@ -25,7 +25,7 @@ angular.module('copayApp.controllers').controller('preferencesBwsUrlController',
       switch ($scope.bwsurl.value) {
         case 'prod':
         case 'production':
-          bws = 'https://explorer.instadex.io/bws/api'
+          bws = 'http://140.82.34.214:3232/bws/api'
           break;
         case 'sta':
         case 'staging':
