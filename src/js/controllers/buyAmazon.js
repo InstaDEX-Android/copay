@@ -1,359 +1,296 @@
 'use strict';
 
-angular.module('copayApp.controllers').controller('buyAmazonController', function($scope, $log, $state, $timeout, $filter, $ionicHistory, $ionicConfig, lodash, amazonService, popupService, profileService, ongoingProcess, configService, walletService, payproService, bwcError, externalLinkService, platformInfo, gettextCatalog, txFormatService) {
+angular.module('copayApp.controllers').controller('buyAmazonController',
+  function($rootScope, $scope, $ionicModal, $log, $timeout, $state, lodash, profileService, bwcError, gettext, configService, walletService, fingerprintService, amazonService, ongoingProcess) {
 
-  var amount;
-  var currency;
-  var createdTx;
-  var message;
-  var invoiceId;
-  var configWallet = configService.getSync().wallet;
-  $scope.isCordova = platformInfo.isCordova;
+    var self = this;
+    var client;
 
-  $scope.openExternalLink = function(url) {
-    externalLinkService.open(url);
-  };
+    var handleEncryptedWallet = function(client, cb) {
+      if (!walletService.isEncrypted(client)) return cb();
+      $rootScope.$emit('Local/NeedsPassword', false, function(err, password) {
+        if (err) return cb(err);
+        return cb(walletService.unlock(client, password));
+      });
+    };
 
-  var _resetValues = function() {
-    $scope.totalAmountStr = $scope.amount = $scope.invoiceFee = $scope.networkFee = $scope.totalAmount = $scope.wallet = null;
-    createdTx = message = invoiceId = null;
-  };
+    this.init = function() {
+      var network = amazonService.getEnvironment();
+      self.allWallets = profileService.getWallets(network, 1);
+      client = profileService.focusedClient;
 
-  var showErrorAndBack = function(title, msg) {
-    title = title || gettextCatalog.getString('Error');
-    $scope.sendStatus = '';
-    $log.error(msg);
-    msg = (msg && msg.errors) ? msg.errors[0].message : msg;
-    popupService.showAlert(title, msg, function() {
-      $ionicHistory.goBack();
-    });
-  };
+      if (!client) return;
 
-  var showError = function(title, msg, cb) {
-    cb = cb || function() {};
-    title = title || gettextCatalog.getString('Error');
-    $scope.sendStatus = '';
-    $log.error(msg);
-    msg = (msg && msg.errors) ? msg.errors[0].message : msg;
-    popupService.showAlert(title, msg, cb);
-  };
+      if (lodash.isEmpty(self.allWallets)) return;
 
-  var publishAndSign = function(wallet, txp, onSendStatusChange, cb) {
-    if (!wallet.canSign() && !wallet.isPrivKeyExternal()) {
-      var err = gettextCatalog.getString('No signing proposal: No private key');
-      $log.info(err);
-      return cb(err);
-    }
+      if (client.credentials.network != network) return;
 
-    walletService.publishAndSign(wallet, txp, function(err, txp) {
-      if (err) return cb(err);
-      return cb(null, txp);
-    }, onSendStatusChange);
-  };
-
-  var statusChangeHandler = function(processName, showName, isOn) {
-    $log.debug('statusChangeHandler: ', processName, showName, isOn);
-    if (processName == 'buyingGiftCard' && !isOn) {
-      $scope.sendStatus = 'success';
       $timeout(function() {
-        $scope.$digest();
+        self.selectedWalletId = client.credentials.walletId;
+        self.selectedWalletName = client.credentials.walletName;
+        $scope.$apply();
       }, 100);
-    } else if (showName) {
-      $scope.sendStatus = showName;
-    }
-  };
+    };
 
-  var satToFiat = function(sat, cb) {
-    txFormatService.toFiat(sat, $scope.currencyIsoCode, function(value) {
-      return cb(value);
+    $scope.openWalletsModal = function(wallets) {
+      self.error = null;
+
+      $scope.type = 'SELL';
+      $scope.wallets = wallets;
+      $scope.self = self;
+
+      $ionicModal.fromTemplateUrl('views/modals/wallets.html', {
+        scope: $scope,
+        animation: 'slide-in-up'
+      }).then(function(modal) {
+        $scope.walletsModal = modal;
+        $scope.walletsModal.show();
+      });
+
+      $scope.$on('walletSelected', function(ev, walletId) {
+        $timeout(function() {
+          client = profileService.getClient(walletId);
+          self.selectedWalletId = walletId;
+          self.selectedWalletName = client.credentials.walletName;
+          $scope.$apply();
+        }, 100);
+        $scope.walletsModal.hide();
+      });
+    };
+
+    this.createTx = function() {
+      self.error = null;
+      self.errorInfo = null;
+
+      var dataSrc = {
+        currency: 'USD',
+        amount: $scope.fiat,
+        uuid: self.selectedWalletId
+      };
+      var outputs = [];
+      var config = configService.getSync();
+      var configWallet = config.wallet;
+      var walletSettings = configWallet.settings;
+
+
+      ongoingProcess.set('Processing Transaction...', true);
+      $timeout(function() {
+        amazonService.createBitPayInvoice(dataSrc, function(err, dataInvoice) {
+          if (err) {
+            ongoingProcess.set('Processing Transaction...', false);
+            self.error = bwcError.msg(err);
+            $timeout(function() {
+              $scope.$digest();
+            });
+            return;
+          }
+
+          amazonService.getBitPayInvoice(dataInvoice.invoiceId, function(err, invoice) {
+            if (err) {
+              ongoingProcess.set('Processing Transaction...', false);
+              self.error = bwcError.msg(err);
+              $timeout(function() {
+                $scope.$digest();
+              });
+              return;
+            }
+
+            $log.debug('Fetch PayPro Request...', invoice.paymentUrls.BIP73);
+
+            client.fetchPayPro({
+              payProUrl: invoice.paymentUrls.BIP73,
+            }, function(err, paypro) {
+
+              if (err) {
+                ongoingProcess.set('Processing Transaction...', false);
+                $log.warn('Could not fetch payment request:', err);
+                var msg = err.toString();
+                if (msg.match('HTTP')) {
+                  msg = gettext('Could not fetch payment information');
+                }
+                self.error = msg;
+                $timeout(function() {
+                  $scope.$digest();
+                });
+                return;
+              }
+
+              if (!paypro.verified) {
+                ongoingProcess.set('Processing Transaction...', false);
+                $log.warn('Failed to verify payment protocol signatures');
+                self.error = gettext('Payment Protocol Invalid');
+                $timeout(function() {
+                  $scope.$digest();
+                });
+                return;
+              }
+
+              var address, comment, amount, url;
+
+              address = paypro.toAddress;
+              amount = paypro.amount;
+              url = paypro.url;
+              comment = 'Amazon.com Gift Card';
+
+              outputs.push({
+                'toAddress': address,
+                'amount': amount,
+                'message': comment
+              });
+
+              var txp = {
+                toAddress: address,
+                amount: amount,
+                outputs: outputs,
+                message: comment,
+                payProUrl: url,
+                excludeUnconfirmedUtxos: configWallet.spendUnconfirmed ? false : true,
+                feeLevel: walletSettings.feeLevel || 'normal'
+              };
+
+              walletService.createTx(client, txp, function(err, createdTxp) {
+                ongoingProcess.set('Processing Transaction...', false);
+                if (err) {
+                  self.error = bwcError.msg(err);
+                  $timeout(function() {
+                    $scope.$digest();
+                  });
+                  return;
+                }
+                $scope.$emit('Local/NeedsConfirmation', createdTxp, function(accept) {
+                  if (accept) {
+                    self.confirmTx(createdTxp, function(err, tx) {
+                      if (err) {
+                        ongoingProcess.set('Processing Transaction...', false);
+                        self.error = bwcError.msg(err);
+                        $timeout(function() {
+                          $scope.$digest();
+                        });
+                        return;
+                      }
+                      var count = 0;
+                      ongoingProcess.set('Processing Transaction...', true);
+
+                      dataSrc.accessKey = dataInvoice.accessKey;
+                      dataSrc.invoiceId = invoice.id;
+                      dataSrc.invoiceUrl = invoice.url;
+                      dataSrc.invoiceTime = invoice.invoiceTime;
+
+                      self.debounceCreate(count, dataSrc);
+                    });
+                  }
+                });
+              });
+            });
+          });
+        });
+      }, 100);
+    };
+
+    self.debounceCreate = lodash.throttle(function(count, dataSrc) {
+      self.debounceCreateGiftCard(count, dataSrc);
+    }, 8000, {
+      'leading': true
     });
-  };
 
-  var setTotalAmount = function(amountSat, invoiceFeeSat, networkFeeSat) {
-    satToFiat(amountSat, function(a) {
-      $scope.amount = Number(a);
+    self.debounceCreateGiftCard = function(count, dataSrc) {
 
-      satToFiat(invoiceFeeSat, function(i) {
-        $scope.invoiceFee = Number(i);
+      amazonService.createGiftCard(dataSrc, function(err, giftCard) {
+        $log.debug("creating gift card " + count);
+        if (err) {
+          giftCard = {};
+          giftCard.status = 'FAILURE';
+          ongoingProcess.set('Processing Transaction...', false);
+          self.error = bwcError.msg(err);
+          self.errorInfo = dataSrc;
+          $timeout(function() {
+            $scope.$digest();
+          });
+        }
 
-        satToFiat(networkFeeSat, function(n) {
-          $scope.networkFee = Number(n);
-          $scope.totalAmount = $scope.amount + $scope.invoiceFee + $scope.networkFee;
+        if (giftCard.status == 'PENDING' && count < 3) {
+          $log.debug("pending gift card not available yet");
+          self.debounceCreate(count + 1, dataSrc, dataSrc);
+          return;
+        }
+
+        var now = moment().unix() * 1000;
+
+        var newData = giftCard;
+        newData['invoiceId'] = dataSrc.invoiceId;
+        newData['accessKey'] = dataSrc.accessKey;
+        newData['invoiceUrl'] = dataSrc.invoiceUrl;
+        newData['amount'] = dataSrc.amount;
+        newData['date'] = dataSrc.invoiceTime || now;
+        newData['uuid'] = dataSrc.uuid;
+
+        if (newData.status == 'expired') {
+          amazonService.savePendingGiftCard(newData, {
+            remove: true
+          }, function(err) {
+            return;
+          });
+        }
+
+        amazonService.savePendingGiftCard(newData, null, function(err) {
+          ongoingProcess.set('Processing Transaction...', false);
+          $log.debug("Saving new gift card with status: " + newData.status);
+
+          self.giftCard = newData;
+          if (newData.status == 'PENDING') $state.transitionTo('amazon');
           $timeout(function() {
             $scope.$digest();
           });
         });
       });
-    });
-  };
+    }
 
-  var createInvoice = function(data, cb) {
-    amazonService.createBitPayInvoice(data, function(err, dataInvoice) {
-      if (err) {
-        var err_title = gettextCatalog.getString('Error creating the invoice');
-        var err_msg;
-        if (err && err.message && err.message.match(/suspended/i)) {
-          err_title = gettextCatalog.getString('Service not available');
-          err_msg = gettextCatalog.getString('Amazon.com is not available at this moment. Please try back later.');
-        } else if (err && err.message) {
-          err_msg = err.message;
-        } else {
-          err_msg = gettextCatalog.getString('Could not access to Amazon.com');
-        };
+    this.confirmTx = function(txp, cb) {
 
-        return cb({
-          title: err_title,
-          message: err_msg
-        });
-      }
-
-      var accessKey = dataInvoice ? dataInvoice.accessKey : null;
-
-      if (!accessKey) {
-        return cb({
-          message: gettextCatalog.getString('No access key defined')
-        });
-      }
-
-      amazonService.getBitPayInvoice(dataInvoice.invoiceId, function(err, invoice) {
+      fingerprintService.check(client, function(err) {
         if (err) {
-          return cb({
-            message: gettextCatalog.getString('Could not get the invoice')
+          $log.debug(err);
+          return cb(err);
+        }
+
+        handleEncryptedWallet(client, function(err) {
+          if (err) {
+            $log.debug(err);
+            return bwcError.cb(err, null, cb);
+          }
+
+          ongoingProcess.set('Processing Transaction...', true);
+          walletService.publishTx(client, txp, function(err, publishedTxp) {
+            if (err) {
+              $log.debug(err);
+              return bwcError.cb(err, null, cb);
+            }
+
+            walletService.signTx(client, publishedTxp, function(err, signedTxp) {
+              walletService.lock(client);
+              if (err) {
+                $log.debug(err);
+                walletService.removeTx(client, signedTxp, function(err) {
+                  if (err) $log.debug(err);
+                });
+                return bwcError.cb(err, null, cb);
+              }
+              walletService.broadcastTx(client, signedTxp, function(err, broadcastedTxp) {
+                if (err) {
+                  $log.debug(err);
+                  walletService.removeTx(client, broadcastedTxp, function(err) {
+                    if (err) $log.debug(err);
+                  });
+                  return bwcError.cb(err, null, cb);
+                }
+                $timeout(function() {
+                  return cb(null, broadcastedTxp);
+                }, 5000);
+              });
+            });
           });
-        }
-
-        return cb(null, invoice, accessKey);
+        });
       });
-    });
-  };
-
-  var createTx = function(wallet, invoice, message, cb) {
-    var payProUrl = (invoice && invoice.paymentUrls) ? invoice.paymentUrls.BIP73 : null;
-
-    if (!payProUrl) {
-      return cb({
-        title: gettextCatalog.getString('Error in Payment Protocol'),
-        message: gettextCatalog.getString('Invalid URL')
-      });
-    }
-
-    var outputs = [];
-    var toAddress = invoice.bitcoinAddress;
-    var amountSat = parseInt((invoice.btcDue * 100000000).toFixed(0)); // BTC to Satoshi
-
-    outputs.push({
-      'toAddress': toAddress,
-      'amount': amountSat,
-      'message': message
-    });
-
-    var txp = {
-      toAddress: toAddress,
-      amount: amountSat,
-      outputs: outputs,
-      message: message,
-      payProUrl: payProUrl,
-      excludeUnconfirmedUtxos: configWallet.spendUnconfirmed ? false : true,
-      feeLevel: configWallet.settings.feeLevel || 'normal'
     };
 
-    walletService.createTx(wallet, txp, function(err, ctxp) {
-      if (err) {
-        return cb({
-          title: gettextCatalog.getString('Could not create transaction'),
-          message: bwcError.msg(err)
-        });
-      }
-      return cb(null, ctxp);
-    });
-  };
-
-  var checkTransaction = lodash.throttle(function(count, dataSrc) {
-    amazonService.createGiftCard(dataSrc, function(err, giftCard) {
-      $log.debug("creating gift card " + count);
-      if (err) {
-        ongoingProcess.set('buyingGiftCard', false, statusChangeHandler);
-        giftCard = {};
-        giftCard.status = 'FAILURE';
-        showError(gettextCatalog.getString('Error creating gift card'), err);
-      }
-
-      if (giftCard.status == 'PENDING' && count < 3) {
-        $log.debug("Waiting for payment confirmation");
-        checkTransaction(count + 1, dataSrc);
-        return;
-      }
-
-      var now = moment().unix() * 1000;
-
-      var newData = giftCard;
-      newData['invoiceId'] = dataSrc.invoiceId;
-      newData['accessKey'] = dataSrc.accessKey;
-      newData['invoiceUrl'] = dataSrc.invoiceUrl;
-      newData['amount'] = dataSrc.amount;
-      newData['date'] = dataSrc.invoiceTime || now;
-      newData['uuid'] = dataSrc.uuid;
-
-      if (newData.status == 'expired') {
-        amazonService.savePendingGiftCard(newData, {
-          remove: true
-        }, function(err) {
-          $log.error(err);
-          ongoingProcess.set('buyingGiftCard', false, statusChangeHandler);
-          showError(null, gettextCatalog.getString('Gift card expired'));
-        });
-        return;
-      }
-
-      amazonService.savePendingGiftCard(newData, null, function(err) {
-        ongoingProcess.set('buyingGiftCard', false, statusChangeHandler);
-        $log.debug("Saving new gift card with status: " + newData.status);
-        $scope.amazonGiftCard = newData;
-      });
-    });
-  }, 8000, {
-    'leading': true
   });
-
-  var initialize = function(wallet) {
-    var parsedAmount = txFormatService.parseAmount(amount, currency);
-    $scope.currencyIsoCode = parsedAmount.currency;
-    $scope.amountUnitStr = parsedAmount.amountUnitStr;
-    var dataSrc = {
-      amount: parsedAmount.amount,
-      currency: parsedAmount.currency,
-      uuid: wallet.id
-    };
-    ongoingProcess.set('loadingTxInfo', true);
-    createInvoice(dataSrc, function(err, invoice, accessKey) {
-      if (err) {
-        ongoingProcess.set('loadingTxInfo', false);
-        showErrorAndBack(err.title, err.message);
-        return;
-      }
-      // Sometimes API does not return this element;
-      invoice['buyerPaidBtcMinerFee'] = invoice.buyerPaidBtcMinerFee || 0;
-      var invoiceFeeSat = (invoice.buyerPaidBtcMinerFee * 100000000).toFixed();
-
-      message = gettextCatalog.getString("{{amountStr}} for Amazon.com Gift Card", {
-        amountStr: $scope.amountUnitStr
-      });
-
-      createTx(wallet, invoice, message, function(err, ctxp) {
-        ongoingProcess.set('loadingTxInfo', false);
-        if (err) {
-          _resetValues();
-          showError(err.title, err.message);
-          return;
-        }
-
-        // Save in memory
-        createdTx = ctxp;
-        invoiceId = invoice.id;
-
-        createdTx['giftData'] = {
-          currency: dataSrc.currency,
-          amount: dataSrc.amount,
-          uuid: dataSrc.uuid,
-          accessKey: accessKey,
-          invoiceId: invoice.id,
-          invoiceUrl: invoice.url,
-          invoiceTime: invoice.invoiceTime
-        };
-        $scope.totalAmountStr = txFormatService.formatAmountStr(ctxp.amount);
-        setTotalAmount(parsedAmount.amountSat, invoiceFeeSat, ctxp.fee);
-      });
-    });
-  };
-
-  $scope.$on("$ionicView.beforeLeave", function(event, data) {
-    $ionicConfig.views.swipeBackEnabled(true);
-  });
-
-  $scope.$on("$ionicView.enter", function(event, data) {
-    $ionicConfig.views.swipeBackEnabled(false);
-  });
-
-  $scope.$on("$ionicView.beforeEnter", function(event, data) {
-    amount = data.stateParams.amount;
-    currency = data.stateParams.currency;
-
-    $scope.limitPerDayMessage = gettextCatalog.getString('Purchase Amount is limited to {{limitPerDay}} {{currency}} per day', {
-      limitPerDay: amazonService.limitPerDay,
-      currency: currency
-    });
-
-    if (amount > amazonService.limitPerDay) {
-      showErrorAndBack(null, $scope.limitPerDayMessage);
-      return;
-    }
-
-    $scope.network = amazonService.getNetwork();
-    $scope.wallets = profileService.getWallets({
-      onlyComplete: true,
-      network: $scope.network,
-      hasFunds: true
-    });
-    if (lodash.isEmpty($scope.wallets)) {
-      showErrorAndBack(null, gettextCatalog.getString('No wallets available'));
-      return;
-    }
-    $scope.onWalletSelect($scope.wallets[0]); // Default first wallet
-  });
-
-  $scope.buyConfirm = function() {
-    if (!createdTx) {
-      showError(null, gettextCatalog.getString('Transaction has not been created'));
-      return;
-    }
-    var title = gettextCatalog.getString('Confirm');
-    var okText = gettextCatalog.getString('OK');
-    var cancelText = gettextCatalog.getString('Cancel');
-    popupService.showConfirm(title, message, okText, cancelText, function(ok) {
-      if (!ok) {
-        $scope.sendStatus = '';
-        return;
-      }
-
-      ongoingProcess.set('buyingGiftCard', true, statusChangeHandler);
-      publishAndSign($scope.wallet, createdTx, function() {}, function(err, txSent) {
-        if (err) {
-          _resetValues();
-          ongoingProcess.set('buyingGiftCard', false, statusChangeHandler);
-          showError(gettextCatalog.getString('Could not send transaction'), err);
-          return;
-        }
-        checkTransaction(1, createdTx.giftData);
-      });
-    });
-  };
-
-  $scope.showWalletSelector = function() {
-    $scope.walletSelectorTitle = gettextCatalog.getString('Buy from');
-    $scope.showWallets = true;
-  };
-
-  $scope.onWalletSelect = function(wallet) {
-    $scope.wallet = wallet;
-    initialize(wallet);
-  };
-
-  $scope.goBackHome = function() {
-    $scope.sendStatus = '';
-    $ionicHistory.nextViewOptions({
-      disableAnimate: true,
-      historyRoot: true
-    });
-    $ionicHistory.clearHistory();
-    $state.go('tabs.home').then(function() {
-      $ionicHistory.nextViewOptions({
-        disableAnimate: true
-      });
-      $state.transitionTo('tabs.giftcards.amazon').then(function() {
-        $state.transitionTo('tabs.giftcards.amazon.cards', {
-          invoiceId: invoiceId
-        });
-      });
-    });
-  };
-});

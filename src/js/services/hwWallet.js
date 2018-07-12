@@ -1,67 +1,43 @@
 'use strict';
 
 angular.module('copayApp.services')
-  .factory('hwWallet', function($log, bwcService) {
+  .factory('hwWallet', function($log,  bwcService) {
     var root = {};
 
     // Ledger magic number to get xPub without user confirmation
     root.ENTROPY_INDEX_PATH = "0xb11e/";
-    root.M = 'm/';
     root.UNISIG_ROOTPATH = 44;
     root.MULTISIG_ROOTPATH = 48;
-    root.LIVENET_PATH = 44;
-    root.TESTNET_PATH = 1;
+    root.LIVENET_PATH = 0;
 
     root._err = function(data) {
-      var msg = data.error || data.message || 'unknown';
+      var msg = 'Hardware Wallet Error: ' + (data.error || data.message || 'unknown');
+      $log.warn(msg);
       return msg;
     };
 
 
     root.getRootPath = function(device, isMultisig, account) {
-      var path;
-      if (isMultisig) {
-        path = root.MULTISIG_ROOTPATH;
-      } else {
-        if (device == 'ledger' && account > 0) {
-          path = root.MULTISIG_ROOTPATH;
-        } else {
-          path = root.UNISIG_ROOTPATH;
-        }
-      }
-      if (device == 'intelTEE') {
-        path = root.M + path;
-      }
-      return path;
+      if (!isMultisig) return root.UNISIG_ROOTPATH;
+
+      // Compat
+      if (device == 'ledger' && account ==0) return root.UNISIG_ROOTPATH;
+
+      return root.MULTISIG_ROOTPATH;
     };
 
-    root.getAddressPath = function(device, isMultisig, account, network) {
-      network = network || 'livenet';
-      var networkPath = root.LIVENET_PATH;
-      if (network == 'testnet') {
-        networkPath = root.TESTNET_PATH;
-      }
-      return root.getRootPath(device, isMultisig, account) + "'/" + networkPath + "'/" + account + "'";
-     };
+    root.getAddressPath = function(device, isMultisig, account) {
+      return root.getRootPath(device,isMultisig,account) + "'/" + root.LIVENET_PATH + "'/" + account + "'";
+    }
 
     root.getEntropyPath = function(device, isMultisig, account) {
-      var path = root.ENTROPY_INDEX_PATH;
-      if (isMultisig) {
-        path = path + "48'/"
-      } else {
-        path = path + "44'/"
-      }
+      var path;
 
       // Old ledger wallet compat
-      if (device == 'ledger' && account == 0) {
-        return path + "0'/";
-      }
+      if (device == 'ledger' && account == 0)
+        return root.ENTROPY_INDEX_PATH  + "0'";
 
-      if (device == 'intelTEE') {
-        path = root.M + path;
-      }
-
-      return path + account + "'";
+      return root.ENTROPY_INDEX_PATH + root.getRootPath(device,isMultisig,account) + "'/" + account + "'";
     };
 
     root.pubKeyToEntropySource = function(xPubKey) {

@@ -1,36 +1,47 @@
 'use strict';
 
 angular.module('copayApp.controllers').controller('preferencesGlideraController',
-  function($scope, $timeout, $state, $ionicHistory, glideraService, popupService) {
+  function($scope, $timeout, $ionicModal, profileService, applicationService, glideraService, storageService) {
 
-    $scope.revokeToken = function() {
-      popupService.showConfirm('Glidera', 'Are you sure you would like to log out of your Glidera account?', null, null, function(res) {
-        if (res) {
-          glideraService.remove(function() {
-            $ionicHistory.clearHistory();
-            $timeout(function() {
-              $state.go('tabs.home');
-            }, 100);
-          });
-        }
+    this.getEmail = function(token) {
+      var self = this;
+      glideraService.getEmail(token, function(error, data) {
+        self.email = data;
       });
     };
 
-    $scope.$on("$ionicView.afterEnter", function(event, data){
-      glideraService.updateStatus($scope.account);
-    });
-
-    $scope.$on("$ionicView.beforeEnter", function(event, data){
-      $scope.account = {};
-      glideraService.init(function(err, glidera) {
-        if (err || !glidera) {
-          if (err) popupService.showAlert('Error connecting Glidera', err);
-          return;
-        }
-        $scope.account['token'] = glidera.token;
-        $scope.account['permissions'] = glidera.permissions;
-        $scope.account['status'] = glidera.status;
+    this.getPersonalInfo = function(token) {
+      var self = this;
+      glideraService.getPersonalInfo(token, function(error, info) {
+        self.personalInfo = info;
       });
-    });
+    };
+
+    this.getStatus = function(token) {
+      var self = this;
+      glideraService.getStatus(token, function(error, data) {
+        self.status = data;
+      });
+    };
+
+    this.getLimits = function(token) {
+      var self = this;
+      glideraService.getLimits(token, function(error, limits) {
+        self.limits = limits;
+      });
+    };
+
+    this.revokeToken = function(testnet) {
+      $scope.network = testnet ? 'testnet' : 'livenet';
+      $scope.loading = false;
+
+      $ionicModal.fromTemplateUrl('views/modals/glidera-confirmation.html', {
+        scope: $scope,
+        animation: 'slide-in-up'
+      }).then(function(modal) {
+        $scope.glideraConfirmationModal = modal;
+        $scope.glideraConfirmationModal.show();
+      });
+    };
 
   });

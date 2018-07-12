@@ -1,64 +1,49 @@
 'use strict';
 
 angular.module('copayApp.controllers').controller('glideraController',
-  function($scope, $timeout, $ionicModal, $log, storageService, glideraService, ongoingProcess, platformInfo, externalLinkService, popupService, lodash) {
+  function($rootScope, $scope, $timeout, $ionicModal, profileService, configService, storageService, glideraService, lodash, ongoingProcess, platformInfo) {
 
-    $scope.openExternalLink = function(url) {
-      externalLinkService.open(url);
-    };
+    if (platformInfo.isCordova && StatusBar.isVisible) {
+      StatusBar.backgroundColorByHexString("#4B6178");
+    }
 
-    var init = function() {
-      ongoingProcess.set('connectingGlidera', true);
-      glideraService.init(function(err, data) {
-        ongoingProcess.set('connectingGlidera', false);
-        if (err) {
-          popupService.showAlert('Error connecting Glidera', err + '. Please re-connect to Glidera');
-          return;
-        }
-        if (!data || (data && !data.token)) return;
-
-        $scope.account['token'] = data.token;
-        $scope.account['status'] = data.status;
-        $scope.account['txs'] = data.txs; 
-
-        $timeout(function() {
-          $scope.$digest();
-          $scope.update();
-        });
-      });
-    };
-
-    $scope.update = function(opts) {
-      $log.debug('Updating Glidera...');
-      glideraService.updateStatus($scope.account);
-    };
-
-    $scope.getAuthenticateUrl = function() {
+    this.getAuthenticateUrl = function() {
       return glideraService.getOauthCodeUrl();
     };
 
-    $scope.submitOauthCode = function(code) {
+    this.submitOauthCode = function(code) {
+      var self = this;
+      var glideraTestnet = configService.getSync().glidera.testnet;
+      var network = glideraTestnet ? 'testnet' : 'livenet';
       ongoingProcess.set('connectingGlidera', true);
-      glideraService.authorize(code, function(err, data) {
-        ongoingProcess.set('connectingGlidera', false);
-        if (err) {
-          popupService.showAlert('Authorisation error', err);
-          return;
-        }
-        $scope.account['token'] = data.token;
-        $scope.account['status'] = data.status;
-        init();
-      });
+      this.error = null;
+      $timeout(function() {
+        glideraService.getToken(code, function(err, data) {
+          ongoingProcess.set('connectingGlidera', false);
+          if (err) {
+            self.error = err;
+            $timeout(function() {
+              $scope.$apply();
+            }, 100);
+          } else if (data && data.access_token) {
+            storageService.setGlideraToken(network, data.access_token, function() {
+              $scope.$emit('Local/GlideraUpdated', data.access_token);
+              $timeout(function() {
+                $scope.$apply();
+              }, 100);
+            });
+          }
+        });
+      }, 100);
     };
 
-    $scope.openTxModal = function(tx) {
+    this.openTxModal = function(token, tx) {
+      var self = this;
+
+      $scope.self = self;
       $scope.tx = tx;
 
-      glideraService.getTransaction($scope.account.token, tx.transactionUuid, function(err, tx) {
-        if (err) {
-          popupService.showAlert('Error getting transaction', 'Could not get transactions');
-          return;
-        }
+      glideraService.getTransaction(token, tx.transactionUuid, function(error, tx) {
         $scope.tx = tx;
       });
 
@@ -72,41 +57,5 @@ angular.module('copayApp.controllers').controller('glideraController',
         $scope.glideraTxDetailsModal.show();
       });
     };
-
-    $scope.openAuthenticateWindow = function() {
-      $scope.openExternalLink($scope.getAuthenticateUrl());
-      $scope.showOauthForm = true
-    }
-
-    $scope.openLoginWindow = function() {
-      var glideraUrl = ($scope.network === 'testnet') ? 'https://sandbox.glidera.io/login' : 'https://glidera.io/login';
-      $scope.openExternalLink(glideraUrl);
-    }
-
-    $scope.openSupportWindow = function() {
-      var url = glideraService.getSupportUrl();
-      var optIn = true;
-      var title = 'Glidera Support';
-      var message = 'You can email glidera at support@glidera.io for direct support, or you can contact Glidera on Twitter.';
-      var okText = 'Tweet @GlideraInc';
-      var cancelText = 'Go Back';
-      externalLinkService.open(url, optIn, title, message, okText, cancelText);
-    }
-
-    $scope.toggleOauthForm = function() {
-      $scope.showOauthForm = !$scope.showOauthForm;
-    }
-
-    $scope.$on("$ionicView.afterEnter", function(event, data) {
-      $scope.network = glideraService.getNetwork();
-      $scope.currency = glideraService.getCurrency();
-      $scope.showOauthForm = false;
-      $scope.account = {};
-      if (data.stateParams && data.stateParams.code) {
-        $scope.submitOauthCode(data.stateParams.code);
-      } else {
-        init();
-      }
-    });
 
   });

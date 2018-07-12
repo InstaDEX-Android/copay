@@ -1,17 +1,52 @@
 'use strict';
 
-angular.module('copayApp.controllers').controller('bitpayCardController', function($scope, $timeout, $log, $state, lodash, bitpayCardService, moment, popupService, gettextCatalog, $ionicHistory, bitpayService, externalLinkService, timeService) {
+angular.module('copayApp.controllers').controller('bitpayCardController', function($scope, $rootScope, $timeout, $log, $ionicModal, lodash, bitpayCardService, configService, profileService, walletService, fingerprintService, ongoingProcess, bwcError, bitcore, pbkdf2Service, moment, platformInfo) {
 
   var self = this;
-  $scope.dateRange = {
-    value: 'last30Days'
+  var client;
+
+  var network = 'livenet';
+  self.sandbox = network == 'testnet' ? true : false;
+
+  if (platformInfo.isCordova && StatusBar.isVisible) {
+    StatusBar.backgroundColorByHexString("#293C92");
+  }
+
+  var handleEncryptedWallet = function(client, cb) {
+    if (!walletService.isEncrypted(client)) return cb();
+    $rootScope.$emit('Local/NeedsPassword', false, function(err, password) {
+      if (err) return cb(err);
+      return cb(walletService.unlock(client, password));
+    });
   };
-  $scope.network = bitpayService.getEnvironment().network;
+
+  var processTransactions = function(invoices, history) {
+    for (var i = 0; i < invoices.length; i++) {
+      var matched = false;
+      for (var j = 0; j < history.length; j++) {
+        if (history[j].description[0].indexOf(invoices[i].id) > -1) {
+          matched = true;
+        }
+      }
+      if (!matched && ['paid', 'confirmed', 'complete'].indexOf(invoices[i].status) > -1) {
+
+        history.unshift({
+          timestamp: invoices[i].invoiceTime,
+          description: invoices[i].itemDesc,
+          amount: invoices[i].price,
+          type: '00611 = Client Funded Deposit',
+          pending: true,
+          status: invoices[i].status
+        });
+      }
+    }
+    return history;
+  };
 
   var setDateRange = function(preset) {
     var startDate, endDate;
-    preset = preset ||  'last30Days';
-    switch (preset) {
+    preset = preset || 'last30Days';
+    switch(preset) {
       case 'last30Days':
         startDate = moment().subtract(30, 'days').toISOString();
         endDate = moment().toISOString();
@@ -33,122 +68,297 @@ angular.module('copayApp.controllers').controller('bitpayCardController', functi
     };
   };
 
-  var setGetStarted = function(history, cb) {
-
-    // Is the card new?
-    if (!lodash.isEmpty(history.transactionList))
-      return cb();
-
-    var dateRange = setDateRange('all');
-    bitpayCardService.getHistory($scope.cardId, dateRange, function(err, history) {
-
-      if (!err && lodash.isEmpty(history.transactionList))
-        self.getStarted = true;
-
-      return cb();
-    });
-  };
-
   this.update = function() {
-    var dateRange = setDateRange($scope.dateRange.value);
-
-    $scope.loadingHistory = true;
-    bitpayCardService.getHistory($scope.cardId, dateRange, function(err, history) {
-
-      $scope.loadingHistory = false;
-
+    var dateRange = setDateRange($scope.dateRange);
+    self.loadingSession = true;
+    bitpayCardService.setCredentials(network);
+    bitpayCardService.isAuthenticated(function(err, bpSession) {
+      self.loadingSession = false;
       if (err) {
-        $log.error(err);
-        self.bitpayCardTransactionHistoryCompleted = null;
-        self.bitpayCardTransactionHistoryConfirming = null;
-        self.bitpayCardTransactionHistoryPreAuth = null;
-        self.balance = null;
-        popupService.showAlert(gettextCatalog.getString('Error'), gettextCatalog.getString('Could not get transactions'));
+        self.error = err.data.error || 'Incorrect email or password';
         return;
       }
 
-      setGetStarted(history, function() {
+      self.bitpayCardAuthenticated = bpSession.isAuthenticated;
+      self.bitpayCardTwoFactorPending = bpSession.twoFactorPending ? true : false;
 
-        var txs = lodash.clone(history.txs);
+      if (self.bitpayCardTwoFactorPending) return;
 
-        self.bitpayCardTransactionHistoryConfirming = bitpayCardService.filterTransactions('confirming', txs);
-        self.bitpayCardTransactionHistoryCompleted = bitpayCardService.filterTransactions('completed', txs);
-        self.bitpayCardTransactionHistoryPreAuth = bitpayCardService.filterTransactions('preAuth', txs);
+      if (self.bitpayCardAuthenticated) {
+        $scope.loadingHistory = true;
+        bitpayCardService.invoiceHistory(function(err, invoices) {
+          if (err) $log.error(err);
+          bitpayCardService.transactionHistory(dateRange, function(err, history) {
+            $scope.loadingHistory = false;
+            if (err) {
+              self.error = err;
+              return;
+            }
 
-        self.balance = history.currentCardBalance;
-        self.updatedOn = null;
+            self.bitpayCardTransactionHistory = processTransactions(invoices, history.transactionList);
+            self.bitpayCardCurrentBalance = history.currentCardBalance;
+          });
+        });
+      }
+      $timeout(function() {
+        $scope.$apply();
+      });
+    });
+  };
 
-        if ($scope.dateRange.value == 'last30Days') {
+  this.init = function() {
+    $scope.dateRange = 'last30Days';
+    self.update();
 
-          // TODO?
-          // $log.debug('BitPay Card: storing cache history');
-          // var cacheHistory = {
-          //   balance: history.currentCardBalance,
-          //   transactions: history.txs
-          // };
-          // bitpayCardService.setHistory($scope.cardId, cacheHistory, {}, function(err) {
-          //   if (err) $log.error(err);
-          //   $scope.historyCached = true;
-          // });
+    self.allWallets = profileService.getWallets(network);
+    client = profileService.focusedClient;
+
+    if (!client) return;
+
+    if (lodash.isEmpty(self.allWallets)) return;
+
+    if (client.credentials.network != network) return;
+
+    if (client.credentials.n > 1)
+      self.isMultisigWallet = true;
+
+    $timeout(function() {
+      self.selectedWalletId = client.credentials.walletId;
+      self.selectedWalletName = client.credentials.walletName;
+      $scope.$apply();
+    }, 100);
+  };
+
+  $scope.openWalletsModal = function(wallets) {
+    self.error = null;
+
+    $scope.wallets = wallets;
+    $scope.noColor = true;
+    $scope.self = self;
+
+    $ionicModal.fromTemplateUrl('views/modals/wallets.html', {
+      scope: $scope,
+      animation: 'slide-in-up'
+    }).then(function(modal) {
+      $scope.walletsModal = modal;
+      $scope.walletsModal.show();
+    });
+
+    $scope.$on('walletSelected', function(ev, walletId) {
+      $timeout(function() {
+        client = profileService.getClient(walletId);
+        self.isMultisigWallet = false;
+        self.selectedWalletId = walletId;
+        self.selectedWalletName = client.credentials.walletName;
+        if (client.credentials.n > 1)
+          self.isMultisigWallet = true;
+        $scope.$apply();
+      }, 100);
+      $scope.walletsModal.hide();
+    });
+  };
+
+  this.sendFunds = function() {
+    self.error = null;
+
+    var dataSrc = {
+      amount: $scope.fiat,
+      currency: 'USD'
+    };
+    var outputs = [];
+    var config = configService.getSync();
+    var configWallet = config.wallet;
+    var walletSettings = configWallet.settings;
+
+
+    ongoingProcess.set('Processing Transaction...', true);
+    $timeout(function() {
+
+      bitpayCardService.topUp(dataSrc, function(err, invoiceId) {
+        if (err) {
+          ongoingProcess.set('Processing Transaction...', false);
+          self.error = bwcError.msg(err);
+          $timeout(function() {
+            $scope.$digest();
+          });
+          return;
         }
-        $timeout(function() {
-          $scope.$apply();
+
+        bitpayCardService.getInvoice(invoiceId, function(err, data) {
+        var address, comment, amount;
+
+        address = data.bitcoinAddress;
+        amount = parseInt((data.btcPrice * 100000000).toFixed(0));
+        comment = data.itemDesc;
+
+        outputs.push({
+          'toAddress': address,
+          'amount': amount,
+          'message': comment
+        });
+
+        var txp = {
+          toAddress: address,
+          amount: amount,
+          outputs: outputs,
+          message: comment,
+          payProUrl: null,
+          excludeUnconfirmedUtxos: configWallet.spendUnconfirmed ? false : true,
+          feeLevel: walletSettings.feeLevel || 'normal'
+        };
+
+        walletService.createTx(client, txp, function(err, createdTxp) {
+          ongoingProcess.set('Processing Transaction...', false);
+          if (err) {
+            self.error = bwcError.msg(err);
+            $timeout(function() {
+              $scope.$digest();
+            });
+            return;
+          }
+          $scope.$emit('Local/NeedsConfirmation', createdTxp, function(accept) {
+            if (accept) {
+              self.confirmTx(createdTxp, function(err, tx) {
+                ongoingProcess.set('Processing Transaction...', false);
+                if (err) {
+                  self.error = bwcError.msg(err);
+                  $timeout(function() {
+                    $scope.$digest();
+                  });
+                  return;
+                }
+                self.update();
+                $scope.addFunds = false;
+                $timeout(function() {
+                  $scope.$digest();
+                });
+              });
+            }
+          });
+          });
+        });
+      });
+    }, 100);
+  };
+
+  this.confirmTx = function(txp, cb) {
+
+    fingerprintService.check(client, function(err) {
+      if (err) {
+        $log.debug(err);
+        return cb(err);
+      }
+
+      handleEncryptedWallet(client, function(err) {
+        if (err) {
+          $log.debug(err);
+          return bwcError.cb(err, null, cb);
+        }
+
+        ongoingProcess.set('Processing Transaction...', true);
+        walletService.publishTx(client, txp, function(err, publishedTxp) {
+          if (err) {
+            $log.debug(err);
+            return bwcError.cb(err, null, cb);
+          }
+
+          walletService.signTx(client, publishedTxp, function(err, signedTxp) {
+            walletService.lock(client);
+            if (err) {
+              $log.debug(err);
+              walletService.removeTx(client, signedTxp, function(err) {
+                if (err) $log.debug(err);
+              });
+              return bwcError.cb(err, null, cb);
+            }
+
+            walletService.broadcastTx(client, signedTxp, function(err, broadcastedTxp) {
+              if (err) {
+                $log.debug(err);
+                walletService.removeTx(client, broadcastedTxp, function(err) {
+                  if (err) $log.debug(err);
+                });
+                return bwcError.cb(err, null, cb);
+              }
+              $timeout(function() {
+                return cb(null, broadcastedTxp);
+              }, 5000);
+            });
+          });
         });
       });
     });
   };
 
-  $scope.createdWithinPastDay = function(tx) {
-    var result = false;
-    if (tx.date) {
-      result = timeService.withinPastDay(tx.date);
-    }
-    return result;
-  };
+  this.authenticate = function() {
+    self.error = null;
 
-  this.openExternalLink = function(url) {
-    var optIn = true;
-    var title = null;
-    var message = gettextCatalog.getString('Help and support information is available at the website.');
-    var okText = gettextCatalog.getString('Open');
-    var cancelText = gettextCatalog.getString('Go Back');
-    externalLinkService.open(url, optIn, title, message, okText, cancelText);
-  };
+    var data = {
+      emailAddress : $scope.email,
+      hashedPassword : pbkdf2Service.pbkdf2Sync($scope.password, '..............', 200, 64).toString('hex')
+    };
 
-  this.viewOnBlockchain = function(transactionId) {
-    var url = 'https://insight.bitpay.com/tx/' + transactionId;
-    var optIn = true;
-    var title = null;
-    var message = gettextCatalog.getString('View Transaction on Insight');
-    var okText = gettextCatalog.getString('Open Insight');
-    var cancelText = gettextCatalog.getString('Go Back');
-    externalLinkService.open(url, optIn, title, message, okText, cancelText);
-  };
-
-  $scope.$on("$ionicView.beforeEnter", function(event, data) {
-    $scope.cardId = data.stateParams.id;
-
-    if (!$scope.cardId) {
-      $ionicHistory.nextViewOptions({
-        disableAnimate: true
-      });
-      $state.go('tabs.home');
-    }
-
-
-    bitpayCardService.get({
-      cardId: $scope.cardId,
-      noRefresh: true,
-    }, function(err, cards) {
-
-      if (cards && cards[0]) {
-        self.lastFourDigits = cards[0].lastFourDigits;
-        self.balance = cards[0].balance;
-        self.currencySymbol = cards[0].currencySymbol;
-        self.updatedOn = cards[0].updatedOn;
-        self.currency = cards[0].currency;
+    // POST /authenticate
+    // emailAddress:
+    // hashedPassword:
+    self.authenticating = true;
+    bitpayCardService.authenticate(data, function(err, auth) {
+      self.authenticating = false;
+      if (err && !err.data.error.twoFactorPending) {
+        self.error = 'Authentiation error';
+        return;
       }
+
       self.update();
+      $timeout(function() {
+        $scope.$apply();
+      }, 100);
     });
-  });
+  };
+
+  this.authenticate2FA = function() {
+    self.error = null;
+
+    var data = {
+      twoFactorCode : $scope.twoFactorCode
+    };
+
+    self.authenticating = true;
+    bitpayCardService.authenticate2FA(data, function(err, auth) {
+      self.authenticating = false;
+      if (err) {
+        self.error = 'Authentiation error';
+        return;
+      }
+
+      self.update();
+      $timeout(function() {
+        $scope.$apply();
+      }, 100);
+    });
+  };
+
+  this.getMerchantInfo = function(tx) {
+    var bpTranCodes = bitpayCardService.bpTranCodes;
+    lodash.keys(bpTranCodes).forEach(function(code) {
+      if (tx.type.indexOf(code) === 0) {
+        lodash.assign(tx, bpTranCodes[code]);
+      }
+    });
+  };
+
+  this.getIconName = function(tx) {
+    var icon = tx.mcc || tx.category || null;
+    if (!icon) return 'default';
+    return bitpayCardService.iconMap[icon];
+  };
+
+  this.processDescription = function(tx) {
+    if (lodash.isArray(tx.description)) {
+      return tx.description[0];
+    }
+    return tx.description;
+  };
+
 });
+

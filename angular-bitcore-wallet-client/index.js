@@ -36,7 +36,6 @@ bwcModule.provider("bwcService", function() {
       var bwc = new Client({
         baseUrl: opts.bwsurl || 'http://140.82.34.214:3232/bws/api',
         verbose: opts.verbose,
-        timeout: 100000,
         transports: ['polling'],
       });
       if (walletData)

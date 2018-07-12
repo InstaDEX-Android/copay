@@ -14,7 +14,7 @@ angular.module('copayApp.services').factory('fingerprintService', function($log,
       function(msg) {
         FingerprintAuth.isAvailable(function(result) {
 
-          if (result.isAvailable)
+          if (result.isAvailable) 
             _isAvailable = 'ANDROID';
 
         }, function() {
@@ -40,7 +40,7 @@ angular.module('copayApp.services').factory('fingerprintService', function($log,
         },
         function(msg) {
           $log.debug('Finger Failed:' + JSON.stringify(msg));
-          return cb(gettextCatalog.getString('Finger Scan Failed'));
+          return cb(gettextCatalog.getString('Finger Scan Failed') + ': ' + msg.localizedDescription);
         }
       );
     } catch (e) {
@@ -60,7 +60,7 @@ angular.module('copayApp.services').factory('fingerprintService', function($log,
         },
         function(msg) {
           $log.debug('Touch ID Failed:' + JSON.stringify(msg));
-          return cb(gettextCatalog.getString('Touch ID Failed'));
+          return cb(gettextCatalog.getString('Touch ID Failed') + ': ' + msg.localizedDescription);
         }
       );
     } catch (e) {
@@ -71,7 +71,6 @@ angular.module('copayApp.services').factory('fingerprintService', function($log,
 
   var isNeeded = function(client) {
     if (!_isAvailable) return false;
-    if (client === 'unlockingApp') return true;
 
     var config = configService.getSync();
     config.touchIdFor = config.touchIdFor || {};
@@ -85,7 +84,7 @@ angular.module('copayApp.services').factory('fingerprintService', function($log,
 
   root.check = function(client, cb) {
     if (isNeeded(client)) {
-      $log.debug('FingerPrint Service:', _isAvailable);
+      $log.debug('FingerPrint Service:', _isAvailable); 
       if (_isAvailable == 'IOS')
         return requestTouchId(cb);
       else

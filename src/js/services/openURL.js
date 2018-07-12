@@ -1,18 +1,44 @@
 'use strict';
 
-angular.module('copayApp.services').factory('openURLService', function($rootScope, $ionicHistory, $document, $log, $state, platformInfo, lodash, profileService, incomingData, appConfigService) {
+angular.module('copayApp.services').factory('openURLService', function($rootScope, $ionicHistory, $document, $log, $state, go, platformInfo, lodash, profileService) {
   var root = {};
 
-  var handleOpenURL = function(args) {
+  root.registeredUriHandlers = [{
+    name: 'Bitcoin BIP21 URL',
+    startsWith: 'bitcoin:',
+    transitionTo: 'uripayment',
+  }, {
+    name: 'Glidera Authentication Callback',
+    startsWith: 'copay:glidera',
+    transitionTo: 'uriglidera',
+  }, {
+    name: 'Coinbase Authentication Callback',
+    startsWith: 'copay:coinbase',
+    transitionTo: 'uricoinbase',
+  }];
 
+
+  var handleOpenURL = function(args) {
     $log.info('Handling Open URL: ' + JSON.stringify(args));
+
+    if (!profileService.isBound) {
+      $log.warn('Profile not bound yet. Waiting');
+
+      return $rootScope.$on('Local/ProfileBound', function() {
+        // Wait ux to settle
+        setTimeout(function() {
+          $log.warn('Profile ready, retrying...');
+          handleOpenURL(args);
+        }, 2000);
+      });
+    };
+
     // Stop it from caching the first view as one to return when the app opens
     $ionicHistory.nextViewOptions({
       historyRoot: true,
-      disableBack: false,
+      disableBack: true,
       disableAnimation: true
     });
-
     var url = args.url;
     if (!url) {
       $log.error('No url provided');
@@ -29,7 +55,19 @@ angular.module('copayApp.services').factory('openURLService', function($rootScop
 
     document.addEventListener('handleopenurl', handleOpenURL, false);
 
-    if (!incomingData.redir(url)) {
+    var x = lodash.find(root.registeredUriHandlers, function(x) {
+      return url.indexOf(x.startsWith) == 0 ||
+        url.indexOf('web+' + x.startsWith) == 0 || // web protocols
+        url.indexOf(x.startsWith.replace(':', '://')) == 0 // from mobile devices
+      ;
+    });
+
+    if (x) {
+      $log.debug('openURL GOT ' + x.name + ' URL');
+      return $state.transitionTo(x.transitionTo, {
+        url: url
+      });
+    } else {
       $log.warn('Unknown URL! : ' + url);
     }
   };
@@ -57,15 +95,15 @@ angular.module('copayApp.services').factory('openURLService', function($rootScop
 
       // This event is sent to an existent instance of Copay (only for standalone apps)
       gui.App.on('open', function(pathData) {
-        if (pathData.indexOf('instadex:') != -1) {
-          $log.debug('InstaDEX URL found');
+        if (pathData.indexOf('bitcoin:') != -1) {
+          $log.debug('Bitcoin URL found');
           handleOpenURL({
-            url: pathData.substring(pathData.indexOf('instadex:'))
+            url: pathData.substring(pathData.indexOf('bitcoin:'))
           });
-        } else if (pathData.indexOf(appConfigService.name + '://') != -1) {
-          $log.debug(appConfigService.name + ' URL found');
+        } else if (pathData.indexOf('copay:') != -1) {
+          $log.debug('Copay URL found');
           handleOpenURL({
-            url: pathData.substring(pathData.indexOf(appConfigService.name + '://'))
+            url: pathData.substring(pathData.indexOf('copay:'))
           });
         }
       });
@@ -78,14 +116,14 @@ angular.module('copayApp.services').factory('openURLService', function($rootScop
         });
       }
     } else if (platformInfo.isDevel) {
+
       var base = window.location.origin + '/';
       var url = base + '#/uri/%s';
 
       if (navigator.registerProtocolHandler) {
         $log.debug('Registering Browser handlers base:' + base);
-        navigator.registerProtocolHandler('web+instadex', url, 'InstaDEX Copay Wallet Handler');
-        navigator.registerProtocolHandler('web+instadex-copay', url, 'InstaDEX Copay Wallet Handler');
-        navigator.registerProtocolHandler('web+bitpay', url, 'InstaDEX Wallet Handler');
+        navigator.registerProtocolHandler('bitcoin', url, 'Copay Bitcoin Handler');
+        navigator.registerProtocolHandler('web+copay', url, 'Copay Wallet Handler');
       }
     }
   };
@@ -95,14 +133,7 @@ angular.module('copayApp.services').factory('openURLService', function($rootScop
     root.registeredUriHandlers.push(x);
   };
 
-  root.handleURL = function(args) {
-    profileService.whenAvailable(function() {
-      // Wait ux to settle
-      setTimeout(function() {
-        handleOpenURL(args);
-      }, 1000);
-    });
-  };
+  root.handleURL = handleOpenURL;
 
   return root;
 });

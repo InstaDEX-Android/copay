@@ -1,138 +1,83 @@
 'use strict';
-angular.module('copayApp.services').factory('pushNotificationsService', function pushNotificationsService($log, $state, $ionicHistory, sjcl, platformInfo, lodash, appConfigService, profileService, configService) {
-  var root = {};
-  var isIOS = platformInfo.isIOS;
-  var isAndroid = platformInfo.isAndroid;
-  var usePushNotifications = platformInfo.isCordova && !platformInfo.isWP;
+angular.module('copayApp.services')
+  .factory('pushNotificationsService', function($log, platformInfo, storageService, configService, lodash) {
+    var root = {};
+    var isCordova = platformInfo.isCordova;
+    var isWP = platformInfo.isWP;
+    var isIOS = platformInfo.isIOS;
+    var isAndroid = platformInfo.isAndroid;
 
-  var _token = null;
+    var usePushNotifications = isCordova && !isWP;
 
-  root.init = function() {
-    if (!usePushNotifications || _token) return;
-    configService.whenAvailable(function(config) {
-      if (!config.pushNotificationsEnabled) return;
-    
-      $log.debug('Starting push notification registration...'); 
+    root.init = function(walletsClients) {
+      var defaults = configService.getDefaults();
+      var push = PushNotification.init(defaults.pushNotifications.config);
 
-      //Keep in mind the function will return null if the token has not been established yet.
-      FCMPlugin.getToken(function(token) {
-        $log.debug('Get token for push notifications: ' + token);
-        _token = token;
-        root.enable();
-      }); 
-    }); 
-  };
+      push.on('registration', function(data) {
+        if (root.token) return;
+        $log.debug('Starting push notification registration');
+        root.token = data.registrationId;
+        var config = configService.getSync();
+        if (config.pushNotifications.enabled) root.enableNotifications(walletsClients);
+      });
 
-  root.updateSubscription = function(walletClient) {
-    if (!_token) {
-      $log.warn('Push notifications disabled for this device. Nothing to do here.');
-      return;
-    }
-    _subscribe(walletClient);
-  };
-
-  root.enable = function() {
-    if (!_token) {
-      $log.warn('No token available for this device. Cannot set push notifications. Needs registration.');
-      return;
+      return push;
     }
 
-    var wallets = profileService.getWallets();
-    lodash.forEach(wallets, function(walletClient) {
-      _subscribe(walletClient);
-    });
-  };
+    root.enableNotifications = function(walletsClients) {
+      if (!usePushNotifications) return;
 
-  root.disable = function() {
-    if (!_token) {
-      $log.warn('No token available for this device. Cannot disable push notifications.');
-      return;
-    }
+      var config = configService.getSync();
+      if (!config.pushNotifications.enabled) return;
 
-    var wallets = profileService.getWallets();
-    lodash.forEach(wallets, function(walletClient) {
-      _unsubscribe(walletClient);
-    });
-    _token = null;
-  };
+      if (!root.token) {
+        $log.warn('No token available for this device. Cannot set push notifications');
+        return;
+      }
 
-  root.unsubscribe = function(walletClient) {
-    if (!_token) return;
-    _unsubscribe(walletClient);
-  };
-
-  var _subscribe = function(walletClient) {
-    var opts = {
-      token : _token,
-      platform: isIOS ? 'ios' : isAndroid ? 'android' : null,
-      packageName : appConfigService.packageNameId
-    };
-    walletClient.pushNotificationsSubscribe(opts, function(err) {
-      if (err) $log.error(walletClient.name + ': Subscription Push Notifications error. ', JSON.stringify(err));
-      else $log.debug(walletClient.name + ': Subscription Push Notifications success.');
-    });
-  };
-
-  var _unsubscribe = function(walletClient, cb) {
-    walletClient.pushNotificationsUnsubscribe(_token, function(err) {
-      if (err) $log.error(walletClient.name + ': Unsubscription Push Notifications error. ', JSON.stringify(err));
-      else $log.debug(walletClient.name + ': Unsubscription Push Notifications Success.');
-    });
-  };
-
-  var _openWallet = function(walletIdHashed) {
-    var wallets = profileService.getWallets();
-    var wallet = lodash.find(wallets, function(w) {
-      return (lodash.isEqual(walletIdHashed, sjcl.codec.hex.fromBits(sjcl.hash.sha256.hash(w.id))));
-    });
-
-    if (!wallet) return;
-    
-    if (!wallet.isComplete()) {
-      return $state.go('tabs.copayers', {
-        walletId: wallet.id 
+      lodash.forEach(walletsClients, function(walletClient) {
+        var opts = {};
+        opts.type = isIOS ? "ios" : isAndroid ? "android" : null;
+        opts.token = root.token;
+        root.subscribe(opts, walletClient, function(err, response) {
+          if (err) $log.warn('Subscription error: ' + err.message + ': ' + JSON.stringify(opts));
+          else $log.debug('Subscribed to push notifications service: ' + JSON.stringify(response));
+        });
       });
     }
 
-    $state.go('tabs.wallet', {
-      walletId: wallet.id
-    });
-  };
+    root.disableNotifications = function(walletsClients) {
+      if (!usePushNotifications) return;
 
-  if (usePushNotifications) {
-    
-    FCMPlugin.onTokenRefresh(function(token) {
-      if (!_token) return;
-      $log.debug('Refresh and update token for push notifications...');
-      _token = token;
-      root.enable();
-    });
-
-    FCMPlugin.onNotification(function(data) {
-      if (!_token) return;
-      $log.debug('New Event Push onNotification: ' + JSON.stringify(data));
-      if(data.wasTapped) {
-        // Notification was received on device tray and tapped by the user. 
-        var walletIdHashed = data.walletId;
-        if (!walletIdHashed) return;
-        $ionicHistory.nextViewOptions({
-          disableAnimate: true,
-          historyRoot: true
+      lodash.forEach(walletsClients, function(walletClient) {
+        root.unsubscribe(walletClient, function(err) {
+          if (err) $log.warn('Unsubscription error: ' + err.message);
+          else $log.debug('Unsubscribed from push notifications service');
         });
-        $ionicHistory.clearHistory();
-        $state.go('tabs.home', {}, {
-          'reload': true,
-          'notify': $state.current.name == 'tabs.home' ? false : true
-        }).then(function() {
-          _openWallet(walletIdHashed);
-        });
-      } else {
-        // TODO
-        // Notification was received in foreground. Maybe the user needs to be notified. 
-      }
-    });
-  } 
+      });
+    }
 
-  return root;
+    root.subscribe = function(opts, walletClient, cb) {
+      if (!usePushNotifications) return cb();
 
-});
+      var config = configService.getSync();
+      if (!config.pushNotifications.enabled) return;
+
+      walletClient.pushNotificationsSubscribe(opts, function(err, resp) {
+        if (err) return cb(err);
+        return cb(null, resp);
+      });
+    }
+
+    root.unsubscribe = function(walletClient, cb) {
+      if (!usePushNotifications) return cb();
+
+      walletClient.pushNotificationsUnsubscribe(function(err) {
+        if (err) return cb(err);
+        return cb(null);
+      });
+    }
+
+    return root;
+
+  });

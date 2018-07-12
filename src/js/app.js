@@ -1,18 +1,16 @@
 'use strict';
 
 var modules = [
+  'ui.router',
   'angularMoment',
   'monospaced.qrcode',
   'gettext',
   'ionic',
-  'ionic-toast',
-  'angular-clipboard',
-  'ngTouch',
   'ngLodash',
+  'ngSanitize',
   'ngCsv',
-  'angular-md5',
   'bwcModule',
-  'bitauthModule',
+  'pbkdf2Module',
   'copayApp.filters',
   'copayApp.services',
   'copayApp.controllers',

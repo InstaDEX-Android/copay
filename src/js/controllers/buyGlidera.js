@@ -1,178 +1,116 @@
 'use strict';
 
-angular.module('copayApp.controllers').controller('buyGlideraController', function($scope, $log, $state, $timeout, $ionicHistory, $ionicConfig, lodash, glideraService, popupService, profileService, ongoingProcess, walletService, platformInfo, txFormatService) {
+angular.module('copayApp.controllers').controller('buyGlideraController',
+  function($scope, $timeout, $ionicModal, profileService, addressService, glideraService, bwcError, lodash, ongoingProcess) {
 
-  var amount;
-  var currency;
+    var self = this;
+    this.show2faCodeInput = null;
+    this.error = null;
+    this.success = null;
 
-  $scope.isCordova = platformInfo.isCordova;
+    this.init = function(testnet) {
+      self.allWallets = profileService.getWallets(testnet ? 'testnet' : 'livenet');
 
-  var showErrorAndBack = function(err) {
-    $scope.sendStatus = '';
-    $log.error(err);
-    err = err.errors ? err.errors[0].message : err || '';
-    popupService.showAlert('Error', err, function() {
-      $ionicHistory.goBack();
-    });
-  };
+      var client = profileService.focusedClient;
+      if (client) {
+        $timeout(function() {
+          self.selectedWalletId = client.credentials.walletId;
+          self.selectedWalletName = client.credentials.walletName;
+          $scope.$apply();
+        }, 100);
+      }
+    };
 
-  var showError = function(err) {
-    $scope.sendStatus = '';
-    $log.error(err);
-    err = err.errors ? err.errors[0].message : err;
-    popupService.showAlert('Error', err);
-  };
+    $scope.openWalletsModal = function(wallets) {
+      self.error = null;
 
-  var statusChangeHandler = function (processName, showName, isOn) {
-    $log.debug('statusChangeHandler: ', processName, showName, isOn);
-    if ( processName == 'buyingBitcoin' && !isOn) {
-      $scope.sendStatus = 'success';
-      $timeout(function() {
-        $scope.$digest();
-      }, 100);
-    } else if (showName) {
-      $scope.sendStatus = showName;
-    }
-  };
+      $scope.type = 'BUY';
+      $scope.wallets = wallets;
+      $scope.noColor = true;
+      $scope.self = self;
 
-  $scope.$on("$ionicView.beforeLeave", function(event, data) {
-    $ionicConfig.views.swipeBackEnabled(true);
-  });
+      $ionicModal.fromTemplateUrl('views/modals/wallets.html', {
+        scope: $scope,
+        animation: 'slide-in-up'
+      }).then(function(modal) {
+        $scope.walletsModal = modal;
+        $scope.walletsModal.show();
+      });
 
-  $scope.$on("$ionicView.enter", function(event, data) {
-    $ionicConfig.views.swipeBackEnabled(false);
-  });
+      $scope.$on('walletSelected', function(ev, walletId) {
+        $timeout(function() {
+          var client = profileService.getClient(walletId);
+          self.selectedWalletId = walletId;
+          self.selectedWalletName = client.credentials.walletName;
+          $scope.$apply();
+        }, 100);
+        $scope.walletsModal.hide();
+      });
+    };
 
-  $scope.$on("$ionicView.beforeEnter", function(event, data) {
-    $scope.isFiat = data.stateParams.currency != 'bits' && data.stateParams.currency != 'BTC' ? true : false;
-    var parsedAmount = txFormatService.parseAmount(
-      data.stateParams.amount, 
-      data.stateParams.currency);
-
-    amount = parsedAmount.amount;
-    currency = parsedAmount.currency;
-    $scope.amountUnitStr = parsedAmount.amountUnitStr;
-
-    $scope.network = glideraService.getNetwork();
-    $scope.wallets = profileService.getWallets({
-      onlyComplete: true,
-      network: $scope.network
-    });
-
-    if (lodash.isEmpty($scope.wallets)) {
-      showErrorAndBack('No wallets available');
-      return;
-    }
-    $scope.wallet = $scope.wallets[0]; // Default first wallet
-
-    ongoingProcess.set('connectingGlidera', true);
-    glideraService.init(function(err, data) {
-      if (err) {
-        ongoingProcess.set('connectingGlidera', false);
-        showErrorAndBack(err);
+    this.getBuyPrice = function(token, price) {
+      var self = this;
+      this.error = null;
+      if (!price || (price && !price.qty && !price.fiat)) {
+        this.buyPrice = null;
         return;
       }
-      $scope.token = data.token;
-      var price = {};
-      if ($scope.isFiat) {
-        price['fiat'] = amount;
-      } else {
-        price['qty'] = amount;
-      }
-      glideraService.buyPrice($scope.token, price, function(err, buy) {
-        ongoingProcess.set('connectingGlidera', false);
+      this.gettingBuyPrice = true;
+      glideraService.buyPrice(token, price, function(err, buyPrice) {
+        self.gettingBuyPrice = false;
         if (err) {
-          showErrorAndBack(err);
+          self.error = 'Could not get exchange information. Please, try again.';
           return;
         }
-        $scope.buyInfo = buy;
+        self.buyPrice = buyPrice;
       });
-    });
-  });
+    };
 
-  var ask2FaCode = function(mode, cb) {
-    if (mode != 'NONE') {
-      // SHOW PROMPT
-      var title = 'Please, enter the code below';
-      var message;
-      if (mode == 'PIN') {
-        message = 'You have enabled PIN based two-factor authentication.';
-      } else if (mode == 'AUTHENTICATOR') {
-        message = 'Use an authenticator app (Authy or Google Authenticator).';
-      } else {
-        message = 'A SMS containing a confirmation code was sent to your phone.';
-      }
-      popupService.showPrompt(title, message, null, function(twoFaCode) {
-        if (typeof twoFaCode == 'undefined') return cb();
-        return cb(twoFaCode);
-      });   
-    } else {
-      return cb();
-    }
-  };
-
-  $scope.buyConfirm = function() {
-    var message = 'Buy bitcoin for ' + amount + ' ' + currency;
-    var okText = 'Confirm';
-    var cancelText = 'Cancel';
-    popupService.showConfirm(null, message, okText, cancelText, function(ok) {
-      if (!ok) return; 
-      ongoingProcess.set('buyingBitcoin', true, statusChangeHandler);
-      glideraService.get2faCode($scope.token, function(err, tfa) {
-        if (err) {
-          ongoingProcess.set('buyingBitcoin', false, statusChangeHandler);
-          showError(err);
-          return;
-        }
-        ask2FaCode(tfa.mode, function(twoFaCode) {
-          if (tfa.mode != 'NONE' && lodash.isEmpty(twoFaCode)) {
-            ongoingProcess.set('buyingBitcoin', false, statusChangeHandler);
-            showError('No code entered');
+    this.get2faCode = function(token) {
+      var self = this;
+      self.error = null;
+      ongoingProcess.set('Sending 2FA code...', true);
+      $timeout(function() {
+        glideraService.get2faCode(token, function(err, sent) {
+          ongoingProcess.set('Sending 2FA code...', false);
+          if (err) {
+            self.error = 'Could not send confirmation code to your phone';
             return;
           }
+          self.show2faCodeInput = sent;
+        });
+      }, 100);
+    };
 
-          walletService.getAddress($scope.wallet, false, function(err, walletAddr) {
+    this.sendRequest = function(token, permissions, twoFaCode) {
+      var self = this;
+      self.error = null;
+      ongoingProcess.set('Buying Bitcoin...', true);
+      $timeout(function() {
+        addressService.getAddress(self.selectedWalletId, false, function(err, walletAddr) {
+          if (err) {
+            ongoingProcess.set('Buying Bitcoin...', false);
+            self.error = bwcError.cb(err, 'Could not create address');
+            return;
+          }
+          var data = {
+            destinationAddress: walletAddr,
+            qty: self.buyPrice.qty,
+            priceUuid: self.buyPrice.priceUuid,
+            useCurrentPrice: false,
+            ip: null
+          };
+          glideraService.buy(token, twoFaCode, data, function(err, data) {
+            ongoingProcess.set('Buying Bitcoin...', false);
             if (err) {
-              ongoingProcess.set('buyingBitcoin', false, statusChangeHandler);
-              showError(err);
+              self.error = err;
               return;
             }
-            var data = {
-              destinationAddress: walletAddr,
-              qty: $scope.buyInfo.qty,
-              priceUuid: $scope.buyInfo.priceUuid,
-              useCurrentPrice: false,
-              ip: null
-            };
-            glideraService.buy($scope.token, twoFaCode, data, function(err, data) {
-              ongoingProcess.set('buyingBitcoin', false, statusChangeHandler);
-              if (err) return showError(err);
-              $log.info(data);
-            });
+            self.success = data;
+            $scope.$emit('Local/GlideraTx');
           });
         });
-      });
-    });
-  };
+      }, 100);
+    };
 
-  $scope.showWalletSelector = function() {
-    $scope.walletSelectorTitle = 'Receive in';
-    $scope.showWallets = true;
-  };
-
-  $scope.onWalletSelect = function(wallet) {
-    $scope.wallet = wallet;
-  };
-
-  $scope.goBackHome = function() {
-    $scope.sendStatus = '';
-    $ionicHistory.nextViewOptions({
-      disableAnimate: true,
-      historyRoot: true
-    });
-    $ionicHistory.clearHistory();
-    $state.go('tabs.home').then(function() {
-      $state.transitionTo('tabs.buyandsell.glidera');
-    });
-  };
-});
+  });

@@ -1,7 +1,8 @@
 ./index.html
-./cordova.js
 ./css/*.css
+./font/*
 ./fonts/*
+./icons/*
 ./img/*
 ./img/**/*
 ./js/*.js
